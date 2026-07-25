@@ -164,27 +164,122 @@ void Tensor::debug() const {
 }
 
 bool Tensor::isContiguous() const {
-    TO_BE_IMPLEMENTED();
+    // TO_BE_IMPLEMENTED();
+    ptrdiff_t expected_stride = 1; // 最后一维的 stride 必须为 1
+    for (int i = (int)_meta.shape.size() - 1; i >= 0; i--) {
+        if (_meta.strides[i] != expected_stride) {
+            return false;
+        }
+        expected_stride *= (ptrdiff_t)_meta.shape[i];
+    }
     return true;
 }
 
 tensor_t Tensor::permute(const std::vector<size_t> &order) const {
-    TO_BE_IMPLEMENTED();
-    return std::shared_ptr<Tensor>(new Tensor(_meta, _storage));
+    // TO_BE_IMPLEMENTED();
+    ASSERT(order.size() == _meta.shape.size(),
+           "permute: order must have same number of dimensions");
+
+    std::vector<size_t> new_shape(_meta.shape.size());
+    std::vector<ptrdiff_t> new_strides(_meta.shape.size());
+
+    for (size_t i = 0; i < order.size(); i++) {
+        ASSERT(order[i] < _meta.shape.size(),
+               "permute: order index out of range");
+        new_shape[i] = _meta.shape[order[i]];
+        new_strides[i] = _meta.strides[order[i]];
+    }
+
+    TensorMeta new_meta{_meta.dtype, new_shape, new_strides};
+    return std::shared_ptr<Tensor>(new Tensor(new_meta, _storage, _offset));
+    // return std::shared_ptr<Tensor>(new Tensor(_meta, _storage));// 原桩代码。
 }
 
 tensor_t Tensor::view(const std::vector<size_t> &shape) const {
-    TO_BE_IMPLEMENTED();
-    return std::shared_ptr<Tensor>(new Tensor(_meta, _storage));
+    // TO_BE_IMPLEMENTED();
+    // 1. 总元素数必须一致
+    size_t new_numel = 1;
+    for (size_t s : shape) new_numel *= s;
+    CHECK_ARGUMENT(new_numel == this->numel(),
+                   "view: new shape must have same number of elements");
+
+    std::vector<ptrdiff_t> new_strides(shape.size());
+
+    // 2. 连续张量：新 strides 直接从新 shape 算
+    if (this->isContiguous()) {
+        size_t stride = 1;
+        for (size_t i = shape.size(); i > 0; i--) {
+            new_strides[i - 1] = (ptrdiff_t)stride;
+            stride *= shape[i - 1];
+        }
+    } else {
+        // 3. 不连续张量：检查 stride 兼容性
+        auto work_shape = _meta.shape;
+        auto work_strides = _meta.strides;
+        int old_dim = (int)work_shape.size() - 1;
+
+        for (int new_dim = (int)shape.size() - 1; new_dim >= 0; new_dim--) {
+            size_t need = shape[new_dim];
+
+            int merge_start = old_dim;
+            size_t prod = 1;
+
+            while (prod < need && old_dim >= 0) {
+                prod *= work_shape[old_dim];
+                old_dim--;
+            }
+
+            CHECK_ARGUMENT(prod >= need && prod % need == 0,
+                           "view: shape not compatible with strides. Use reshape() instead.");
+
+            // 检查被合并的维度在内存中连续
+            for (int j = merge_start; j > old_dim + 1; j--) {
+                ASSERT(_meta.strides[j - 1] == _meta.strides[j] * (ptrdiff_t)_meta.shape[j],
+                       "view: merged dimensions not contiguous. Use reshape() instead.");
+            }
+
+            new_strides[new_dim] = work_strides[merge_start];
+
+            if (prod > need) {
+                old_dim++;
+                work_shape[old_dim] = prod / need;
+                work_strides[old_dim] = work_strides[old_dim] * (ptrdiff_t)need;
+            }
+        }
+    }
+
+    TensorMeta new_meta{_meta.dtype, shape, new_strides};
+    return std::shared_ptr<Tensor>(new Tensor(new_meta, _storage, _offset));
+    // return std::shared_ptr<Tensor>(new Tensor(_meta, _storage));// 原桩代码。
 }
 
 tensor_t Tensor::slice(size_t dim, size_t start, size_t end) const {
-    TO_BE_IMPLEMENTED();
-    return std::shared_ptr<Tensor>(new Tensor(_meta, _storage));
+    // TO_BE_IMPLEMENTED();
+    ASSERT(dim < _meta.shape.size(), "slice: dim out of range");
+    ASSERT(start < end && end <= _meta.shape[dim], "slice: invalid range");
+
+    std::vector<size_t> new_shape = _meta.shape;
+    new_shape[dim] = end - start;
+
+    size_t new_offset = _offset + start * _meta.strides[dim] * this->elementSize();
+
+    TensorMeta new_meta{_meta.dtype, new_shape, _meta.strides};
+    return std::shared_ptr<Tensor>(new Tensor(new_meta, _storage, new_offset));
+    // return std::shared_ptr<Tensor>(new Tensor(_meta, _storage));// 原桩代码。
 }
 
 void Tensor::load(const void *src_) {
-    TO_BE_IMPLEMENTED();
+    // TO_BE_IMPLEMENTED();
+    ASSERT(src_ != nullptr, "load: source pointer must not be null");
+    ASSERT(this->isContiguous(), "load: tensor must be contiguous");
+
+    core::context().setDevice(this->deviceType(), this->deviceId());
+    core::context().runtime().api()->memcpy_sync(
+        this->data(),                        // 目的地：张量内部内存
+        src_,                                // 来源：Python 传来的 CPU 数据地址
+        this->numel() * this->elementSize(), // 要拷贝的字节数
+        LLAISYS_MEMCPY_H2D                   // 方向：Host → Device
+    );
 }
 
 tensor_t Tensor::contiguous() const {
