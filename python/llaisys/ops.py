@@ -20,8 +20,10 @@ class Ops:
 
     @staticmethod
     def linear(out: Tensor, inp: Tensor, weight: Tensor, bias: Tensor):
+        # 为支持 Linear 不提供 bias：bias 为 None 时传 None，对应 C 侧 nullptr（无偏置）。
         LIB_LLAISYS.llaisysLinear(
-            out.lib_tensor(), inp.lib_tensor(), weight.lib_tensor(), bias.lib_tensor()
+            out.lib_tensor(), inp.lib_tensor(), weight.lib_tensor(),
+            bias.lib_tensor() if bias is not None else None,
         )
 
     @staticmethod

@@ -333,6 +333,9 @@ tensor_t Tensor::contiguous() const {
         const std::byte *src = this->data();
 
         // 进位传播：避免逐元素取模/除法，均摊 O(1) 每元素
+        // NOTE: 当前逐元素搬运导致 O(total * ndim) 次循环开销，且每次仅搬运 dsize 字节。
+        // 优化方向：检测最后一维 (或连续段) 步长是否为 1，若连续则改用 memcpy 整行/整段搬运，
+        // 将 memcpy 调用次数从 total 降低至 total / 连续段长度，并利用 SIMD 提升带宽利用率。
         std::vector<size_t> indices(ndim, 0);
         for (size_t linear = 0; linear < total; linear++) {
             size_t src_offset = 0;
