@@ -22,9 +22,17 @@ void rope(tensor_t out, tensor_t in, tensor_t pos_ids, float theta) {
     ASSERT(pos_ids->ndim() == 1 && pos_ids->numel() == seq_len,
            "Rope: pos_ids must be a 1D tensor of length seq_len.");
     CHECK_SAME_DTYPE(out->dtype(), in->dtype());
-    CHECK_ARGUMENT(head_dim % 2 == 0, "Rope: head_dim must be even.");
+    CHECK_ARGUMENT(head_dim > 0 && head_dim % 2 == 0,
+                   "Rope: head_dim must be a positive even number.");  // Fix CR#L25: 补 head_dim>0 下界，堵住 head_dim=0 静默返回脏数据
     CHECK_ARGUMENT(pos_ids->dtype() == LLAISYS_DTYPE_I64, "Rope: pos_ids must be int64.");
     CHECK_ARGUMENT(theta > 0.0f, "Rope: theta must be positive.");
+    // Fix CR#L22-L23: 位置 id 物理语义为非负序列索引，负位置无定义，入口处拒绝（避免静默错误输出）。
+    {
+        const int64_t *pos_check = reinterpret_cast<const int64_t *>(pos_ids->data());
+        for (size_t i = 0; i < pos_ids->numel(); i++) {
+            CHECK_ARGUMENT(pos_check[i] >= 0, "Rope: pos_ids must be non-negative.");
+        }
+    }
 
     if (in->deviceType() == LLAISYS_DEVICE_CPU) {
         return cpu::rope(out->data(), in->data(), pos_ids->data(), in->dtype(),

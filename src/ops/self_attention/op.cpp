@@ -29,6 +29,8 @@ void self_attention(tensor_t attn_val, tensor_t q, tensor_t k, tensor_t v, float
     CHECK_SAME_DTYPE(attn_val->dtype(), q->dtype(), k->dtype(), v->dtype());
     CHECK_ARGUMENT(hd > 0, "SelfAttention: head_dim must be positive.");
     CHECK_ARGUMENT(kvlen > 0, "SelfAttention: kvlen must be positive.");
+    CHECK_ARGUMENT(kvlen >= qlen,
+                   "SelfAttention: kvlen must be >= qlen (causal attention requires kvcache length >= query length).");  // Fix CR#L34: 补入口校验，kvlen<qlen 时全掩码行 softmax 产生 NaN，以异常替代静默外泄
     CHECK_ARGUMENT(nkvh > 0 && nh % nkvh == 0,
                    "SelfAttention: nh must be a positive multiple of nkvh (GQA).");
 

@@ -12,8 +12,10 @@ void rope_(T *out, const T *in, const int64_t *pos_ids,
     // GPT-NeoX / Llama 风格旋转位置编码：将 head_dim 拆成前后两半 [x_a, x_b]，
     // 对第 i 对 (x_a[i]=x[i], x_b[i]=x[i+d/2]) 以角频率 freq_i = pos / theta^(2i/d)
     // 做旋转：y_a = x_a*cos - x_b*sin,  y_b = x_b*cos + x_a*sin。
-    // 半分格式与旋转符号对齐 torch_rope，并与 llama.cpp ggml_compute_forward_rope_f32
-    // 的 GPT-NeoX 分支一致（dst0=x0*cos-x1*sin, dst1=x0*sin+x1*cos）。
+    // 半分格式与旋转符号对齐 torch_rope，并对齐 llama.cpp GPT-NeoX 风格 RoPE 的
+    // 半分旋转（dst0=x0*cos-x1*sin, dst1=x0*sin+x1*cos，各 backend 保留 is_neox 路径）。
+    // Fix CR#L16: 注释收敛符号名（旧称 ggml_compute_forward_rope_f32 已模板化为
+    // ggml_compute_forward_rope），算法对齐以 test/ops 的 PyTorch 参考为准。
     size_t half = head_dim / 2;
 
     // theta^(2i/d) 每个频率只算一次（与位置无关），对齐 torch 的 theta**(2i/d)；
