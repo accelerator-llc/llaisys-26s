@@ -12,6 +12,15 @@ import struct
 import safetensors
 
 
+# dtype -> 字节数，用于加载前校验原始字节与张量容量一致（Fix CR#L132 低危1）。
+_DSIZE = {
+    DataType.BYTE: 1, DataType.BOOL: 1, DataType.I8: 1, DataType.I16: 2,
+    DataType.I32: 4, DataType.I64: 8, DataType.U8: 1, DataType.U16: 2,
+    DataType.U32: 4, DataType.U64: 8, DataType.F16: 2, DataType.F32: 4,
+    DataType.F64: 8, DataType.BF16: 2,
+}
+
+
 class Qwen2:
 
     def __init__(self, model_path, device: DeviceType = DeviceType.CPU):
@@ -35,24 +44,39 @@ class Qwen2:
         meta.epsilon = config["rms_norm_eps"]
         meta.theta = config["rope_theta"]
         meta.end_token = config["eos_token_id"]
-        # KV-Cache 容量：取 sliding_window（4096），兼顾内存与常见 prompt 长度。
-        meta.maxseq = config.get("sliding_window", 4096)
+        # Fix CR#L38(低危3): KV-Cache 容量取 min(max_position_embeddings, 4096)，
+        # 4096 为内存预算折中（28 层×2×4096×256×2B≈117MB）；与 sliding_window 无关，
+        # prompt+生成超过此值会触发 C++ 侧溢出校验（返回错误而非越界）。
+        meta.maxseq = min(config.get("max_position_embeddings", 4096), 4096)
 
         # 创建模型（V1 仅 CPU 单设备，device_ids[0]=0）。
         device_ids = (ctypes.c_int * 1)(0)
         self._model = LIB_LLAISYS.llaisysQwen2ModelCreate(
             ctypes.byref(meta), device, device_ids, 1)
+        # Fix CR#L20(中危1): Create 失败（非法参数或 C++ 异常）返回 nullptr。
+        if not self._model:
+            raise RuntimeError("llaisysQwen2ModelCreate failed (invalid meta or C++ exception)")
         self._weights = LIB_LLAISYS.llaisysQwen2ModelWeights(self._model).contents
         self._end_token = int(meta.end_token)
 
+        # 逐文件加载权重；统计已加载数与 safetensors 张量总数比对（实际 339 个：
+        # 3 个全局 + 12 类 per-layer × 28 层，含 84 个 bias）。
+        loaded_tensors = 0
+        total_tensors = 0
         for file in sorted(model_path.glob("*.safetensors")):
             data_ = safetensors.safe_open(file, framework="numpy", device="cpu")
             # numpy backend 无法 get_tensor bf16（raise TypeError），
-            # 为了不修改桩代码，手动解析 safetensors 文件取每个权重的原始 bf16 字节再 tensorLoad。
+            # 手动解析 safetensors 文件取每个权重的原始 bf16 字节再 tensorLoad。
             raw_map = self._read_safetensors(file)
+            total_tensors += len(raw_map)
             for name_ in data_.keys():
                 ## TODO: load the model weights
-                self._load_weight(name_, raw_map[name_])
+                if not self._load_weight(name_, raw_map[name_]):
+                    raise ValueError(f"未知权重名，无法映射: {name_}")
+                loaded_tensors += 1
+        # Fix CR#L166(低危2): 校验已加载张量数与 safetensors 总数一致，漏载即报错。
+        if loaded_tensors != total_tensors:
+            raise ValueError(f"loaded {loaded_tensors} != total {total_tensors}")
 
     def generate(
         self,
@@ -65,18 +89,26 @@ class Qwen2:
 
         # TODO: Implement generate function
 
+        # Fix CR#L77(低危8): 空 inputs 前置校验，避免 ntoken=0 触发 C++ 异常路径。
+        if not inputs:
+            raise ValueError("inputs must not be empty")
+        # Fix CR#L71(低危7): 采样参数显式契约；V1 仅贪婪 argmax，非贪婪参数明确报错而非静默忽略。
+        if not (top_k == 1 and top_p == 1.0 and temperature == 1.0):
+            raise NotImplementedError(
+                "V1 仅支持贪婪 argmax (top_k=1, top_p=1.0, temperature=1.0)")
         if max_new_tokens is None:
             max_new_tokens = 128
 
-        # V1 仅实现 argmax 贪婪解码；HF model.generate 未设 do_sample=True 时亦走贪婪，
-        # 故 top_k/top_p/temperature 参数接收但不影响结果。
         LIB_LLAISYS.llaisysQwen2ModelReset(self._model)
 
         inputs = list(inputs)
         # prefill：整段 prompt 一次前向，返回首个生成 token。
+        # Fix CR#L20(中危1): Infer 返回 -1 表 C++ 异常，转 Python 异常。
         token_ids = (ctypes.c_int64 * len(inputs))(*inputs)
         next_token = int(LIB_LLAISYS.llaisysQwen2ModelInfer(
             self._model, token_ids, len(inputs)))
+        if next_token < 0:
+            raise RuntimeError("prefill Infer failed (C++ exception)")
         outputs = inputs + [next_token]
 
         # decode：逐 token 增量前向；命中 end_token 或达 max_new_tokens 停止。
@@ -86,6 +118,8 @@ class Qwen2:
             token_ids = (ctypes.c_int64 * 1)(outputs[-1])
             next_token = int(LIB_LLAISYS.llaisysQwen2ModelInfer(
                 self._model, token_ids, 1))
+            if next_token < 0:
+                raise RuntimeError("decode Infer failed (C++ exception)")
             outputs.append(next_token)
 
         return outputs
@@ -94,6 +128,7 @@ class Qwen2:
         if getattr(self, "_model", None):
             LIB_LLAISYS.llaisysQwen2ModelDestroy(self._model)
             self._model = None
+            self._weights = None  # Fix CR#L45(建议7): 置空避免 use-after-free。
 
     # ------------------------------------------------------------------
     # 权重加载辅助
@@ -109,59 +144,78 @@ class Qwen2:
         """
         with open(file, "rb") as f:
             header_len = struct.unpack("<Q", f.read(8))[0]
+            # Fix CR#L110(低危6): header_len 合理性校验，防止损坏文件产生异常切片。
+            if header_len == 0 or header_len > (1 << 30):
+                raise ValueError(f"invalid safetensors header_len: {header_len}")
             header = json.loads(f.read(header_len))
             data_start = 8 + header_len
             mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+            file_size = len(mm)
             raw_map = {}
             for name, info in header.items():
                 if name == "__metadata__":
                     continue
                 start, end = info["data_offsets"]
+                # Fix CR#L110(低危6): offsets 越界校验。
+                if start < 0 or end < start or data_start + end > file_size:
+                    raise ValueError(f"weight '{name}' offsets out of range: [{start},{end})")
                 raw_map[name] = mm[data_start + start : data_start + end]
             return raw_map
 
-    def _load_weight(self, name, raw):
-        """按 safetensors 权重名匹配到模型权重句柄并 tensorLoad。
-
-        权重命名与 qwen2.h 的 LlaisysQwen2Weights 字段一一对应：
-        model.embed_tokens.weight -> in_embed, lm_head.weight -> out_embed,
-        model.norm.weight -> out_norm_w, model.layers.{i}.* -> per-layer 数组。
-        """
+    def _match_weight_handle(self, name):
+        """按 safetensors 权重名匹配到模型权重句柄，未知返回 None。"""
         w = self._weights
-        lib = LIB_LLAISYS
         if name == "model.embed_tokens.weight":
-            lib.tensorLoad(w.in_embed, raw)
-        elif name == "model.norm.weight":
-            lib.tensorLoad(w.out_norm_w, raw)
-        elif name == "lm_head.weight":
-            lib.tensorLoad(w.out_embed, raw)
-        elif name.startswith("model.layers."):
+            return w.in_embed
+        if name == "model.norm.weight":
+            return w.out_norm_w
+        if name == "lm_head.weight":
+            return w.out_embed
+        if name.startswith("model.layers."):
             parts = name.split(".")
             layer = int(parts[2])
             suffix = ".".join(parts[3:])
-            if suffix == "input_layernorm.weight":
-                lib.tensorLoad(w.attn_norm_w[layer], raw)
-            elif suffix == "self_attn.q_proj.weight":
-                lib.tensorLoad(w.attn_q_w[layer], raw)
-            elif suffix == "self_attn.q_proj.bias":
-                lib.tensorLoad(w.attn_q_b[layer], raw)
-            elif suffix == "self_attn.k_proj.weight":
-                lib.tensorLoad(w.attn_k_w[layer], raw)
-            elif suffix == "self_attn.k_proj.bias":
-                lib.tensorLoad(w.attn_k_b[layer], raw)
-            elif suffix == "self_attn.v_proj.weight":
-                lib.tensorLoad(w.attn_v_w[layer], raw)
-            elif suffix == "self_attn.v_proj.bias":
-                lib.tensorLoad(w.attn_v_b[layer], raw)
-            elif suffix == "self_attn.o_proj.weight":
-                lib.tensorLoad(w.attn_o_w[layer], raw)
-            elif suffix == "post_attention_layernorm.weight":
-                lib.tensorLoad(w.mlp_norm_w[layer], raw)
-            elif suffix == "mlp.gate_proj.weight":
-                lib.tensorLoad(w.mlp_gate_w[layer], raw)
-            elif suffix == "mlp.up_proj.weight":
-                lib.tensorLoad(w.mlp_up_w[layer], raw)
-            elif suffix == "mlp.down_proj.weight":
-                lib.tensorLoad(w.mlp_down_w[layer], raw)
-            # 其余 per-layer 权重（若有）跳过
-        # 其余非 model.layers 权重（若有）跳过
+            mapping = {
+                "input_layernorm.weight": w.attn_norm_w,
+                "self_attn.q_proj.weight": w.attn_q_w,
+                "self_attn.q_proj.bias": w.attn_q_b,
+                "self_attn.k_proj.weight": w.attn_k_w,
+                "self_attn.k_proj.bias": w.attn_k_b,
+                "self_attn.v_proj.weight": w.attn_v_w,
+                "self_attn.v_proj.bias": w.attn_v_b,
+                "self_attn.o_proj.weight": w.attn_o_w,
+                "post_attention_layernorm.weight": w.mlp_norm_w,
+                "mlp.gate_proj.weight": w.mlp_gate_w,
+                "mlp.up_proj.weight": w.mlp_up_w,
+                "mlp.down_proj.weight": w.mlp_down_w,
+            }
+            arr = mapping.get(suffix)
+            if arr is None:
+                return None
+            return arr[layer]
+        return None
+
+    @staticmethod
+    def _tensor_capacity_bytes(handle):
+        """计算张量容量字节数 = numel × dtype 字节数。"""
+        ndim = LIB_LLAISYS.tensorGetNdim(handle)
+        shape = (ctypes.c_size_t * max(ndim, 1))()
+        LIB_LLAISYS.tensorGetShape(handle, shape)
+        dtype = LIB_LLAISYS.tensorGetDataType(handle)
+        numel = 1
+        for i in range(ndim):
+            numel *= shape[i]
+        return numel * _DSIZE[dtype]
+
+    def _load_weight(self, name, raw):
+        """按权重名匹配句柄并 tensorLoad；未知权重返回 False，字节长度不符抛异常。"""
+        handle = self._match_weight_handle(name)
+        if handle is None:
+            return False
+        # Fix CR#L132(低危1): 校验原始字节长度与张量容量一致，避免映射错配静默加载或越界。
+        expected = self._tensor_capacity_bytes(handle)
+        if len(raw) != expected:
+            raise ValueError(
+                f"weight '{name}' bytes {len(raw)} != tensor capacity {expected}")
+        LIB_LLAISYS.tensorLoad(handle, raw)
+        return True

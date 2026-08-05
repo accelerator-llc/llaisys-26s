@@ -5,9 +5,12 @@ add_includedirs("include")
 
 -- 释放 SIMD 与跨翻译单元内联优化（仅 release/Linux）：-march=native 启用 AVX2/AVX512，
 -- -flto 让 _bf16_to_f32 等跨 TU 小函数内联，使 linear 内层循环可被向量化。
+-- Fix CR#L6(建议3): -march=native 绑定编译机 CPU 指令集，分发到旧 CPU 可能 illegal instruction；
+--     CI 编译+运行同机安全；如需可移植分发可降级为 -march=x86-64-v3。
+-- Fix CR#L6(建议4): 显式 -pthread，兼容 glibc<2.34 的老工具链（新 glibc 已将 pthread 并入 libc）。
 if is_mode("release") and not is_plat("windows") then
-    add_cxflags("-march=native", "-flto")
-    add_ldflags("-flto")
+    add_cxflags("-march=native", "-flto", "-pthread")
+    add_ldflags("-flto", "-pthread")
 end
 
 -- CPU --

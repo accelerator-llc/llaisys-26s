@@ -69,6 +69,8 @@ Qwen2Model::~Qwen2Model() {
 // ============================================================================
 
 void Qwen2Model::allocate_weights() {
+    // Fix CR#L51(低危5): 中途异常时释放已分配权重，避免泄漏（构造函数异常析构不执行）。
+    try {
     llaisysDataType_t dt = _meta.dtype;
 
     // 单个权重张量：new LlaisysTensor{tensor_t}，由 release_weights 以 delete 释放。
@@ -102,6 +104,10 @@ void Qwen2Model::allocate_weights() {
     _weights.mlp_gate_w  = mk_arr({di, hs});              // mlp.gate_proj.weight（无 bias）
     _weights.mlp_up_w    = mk_arr({di, hs});              // mlp.up_proj.weight（无 bias）
     _weights.mlp_down_w  = mk_arr({hs, di});              // mlp.down_proj.weight（无 bias）
+    } catch (...) {
+        release_weights();  // 释放已分配部分（nullptr 安全）
+        throw;  // 重新抛出，交由 C API 层 try/catch 兜底
+    }
 }
 
 void Qwen2Model::release_weights() {
