@@ -13,11 +13,12 @@ import safetensors
 
 
 # dtype -> 字节数，用于加载前校验原始字节与张量容量一致（Fix CR#L132 低危1）。
+# Fix CR#L16(任务3e): 补齐 F8（8-bit float，1 字节）；未知 dtype 在 _tensor_capacity_bytes 抛错。
 _DSIZE = {
     DataType.BYTE: 1, DataType.BOOL: 1, DataType.I8: 1, DataType.I16: 2,
     DataType.I32: 4, DataType.I64: 8, DataType.U8: 1, DataType.U16: 2,
-    DataType.U32: 4, DataType.U64: 8, DataType.F16: 2, DataType.F32: 4,
-    DataType.F64: 8, DataType.BF16: 2,
+    DataType.U32: 4, DataType.U64: 8, DataType.F8: 1, DataType.F16: 2,
+    DataType.F32: 4, DataType.F64: 8, DataType.BF16: 2,
 }
 
 
@@ -92,10 +93,10 @@ class Qwen2:
         # Fix CR#L77(低危8): 空 inputs 前置校验，避免 ntoken=0 触发 C++ 异常路径。
         if not inputs:
             raise ValueError("inputs must not be empty")
-        # Fix CR#L71(低危7): 采样参数显式契约；V1 仅贪婪 argmax，非贪婪参数明确报错而非静默忽略。
-        if not (top_k == 1 and top_p == 1.0 and temperature == 1.0):
-            raise NotImplementedError(
-                "V1 仅支持贪婪 argmax (top_k=1, top_p=1.0, temperature=1.0)")
+        # Fix CR#L92(任务1): 建模 HF 语义--贪婪模式下 top_k/top_p/temperature 存在但不生效
+        # （HF generate 默认 do_sample=False 即贪婪，采样参数本就不生效，已核实）。
+        # V1 仅实现贪婪 argmax；非贪婪参数显式忽略并以注释文档化，不再抛异常（恢复非 --test 兼容）。
+        # 与 --test 逐 token 一致要求不冲突。
         if max_new_tokens is None:
             max_new_tokens = 128
 
@@ -202,10 +203,13 @@ class Qwen2:
         shape = (ctypes.c_size_t * max(ndim, 1))()
         LIB_LLAISYS.tensorGetShape(handle, shape)
         dtype = LIB_LLAISYS.tensorGetDataType(handle)
+        dsize = _DSIZE.get(dtype)
+        if dsize is None:
+            raise ValueError(f"unsupported dtype for capacity check: {dtype}")
         numel = 1
         for i in range(ndim):
             numel *= shape[i]
-        return numel * _DSIZE[dtype]
+        return numel * dsize
 
     def _load_weight(self, name, raw):
         """按权重名匹配句柄并 tensorLoad；未知权重返回 False，字节长度不符抛异常。"""

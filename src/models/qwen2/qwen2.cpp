@@ -79,9 +79,18 @@ void Qwen2Model::allocate_weights() {
     };
     // per-layer 权重数组：nlayer 个同 shape 张量，连续存放于 new[] 数组。
     auto mk_arr = [&](const std::vector<size_t> &shape) -> llaisysTensor_t * {
-        llaisysTensor_t *arr = new llaisysTensor_t[_meta.nlayer];
-        for (size_t i = 0; i < _meta.nlayer; i++) {
-            arr[i] = mk(shape);
+        // Fix CR#L87(任务3b): 值初始化为 nullptr，mk() 中途抛异常时释放已分配元素与数组外壳。
+        llaisysTensor_t *arr = new llaisysTensor_t[_meta.nlayer]();
+        try {
+            for (size_t i = 0; i < _meta.nlayer; i++) {
+                arr[i] = mk(shape);
+            }
+        } catch (...) {
+            for (size_t i = 0; i < _meta.nlayer; i++) {
+                delete arr[i];  // nullptr 安全
+            }
+            delete[] arr;
+            throw;
         }
         return arr;
     };
@@ -273,15 +282,17 @@ int64_t Qwen2Model::infer(const int64_t *token_ids, size_t ntoken) {
         forward_layer(i, hidden, pos_ids, ntoken);
     }
 
-    // 5. final norm -> lm_head -> logits (ntoken, voc)
+    // 5. final norm -> lm_head 仅计算最后一行（V3: lm_head 仅计算末行）。
+    //    工业标准做法（llama.cpp 默认 logits_all=false，vLLM 同），linear 按行独立，
+    //    末行累加顺序与全量计算 bit-exact 一致，argmax 不变；省 prefill lm_head 计算。
     auto final_normed = Tensor::create({ntoken, hs}, _meta.dtype, _device, _device_id);
     rms_norm(final_normed, hidden, _weights.out_norm_w->tensor, _meta.epsilon);
-    auto logits = Tensor::create({ntoken, voc}, _meta.dtype, _device, _device_id);
-    linear(logits, final_normed, _weights.out_embed->tensor, nullptr);
+    auto last_hidden = final_normed->slice(0, ntoken - 1, ntoken);  // (1, hs)
+    auto logits = Tensor::create({1, voc}, _meta.dtype, _device, _device_id);
+    linear(logits, last_hidden, _weights.out_embed->tensor, nullptr);
 
-    // 6. 取最后一个 token 的 logits 做 argmax（贪婪解码）
-    auto last = logits->slice(0, ntoken - 1, ntoken);  // (1, voc)
-    auto last_1d = last->reshape({voc});                // (voc,)，argmax 要求 1D
+    // 6. argmax（logits 已是 (1, voc)，reshape 为 1D）
+    auto last_1d = logits->reshape({voc});  // (voc,)，argmax 要求 1D
     auto max_idx = Tensor::create({1}, LLAISYS_DTYPE_I64, _device, _device_id);
     auto max_val = Tensor::create({1}, _meta.dtype, _device, _device_id);
     argmax(max_idx, max_val, last_1d);

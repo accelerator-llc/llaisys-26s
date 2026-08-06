@@ -15,6 +15,8 @@ namespace llaisys::ops::cpu::detail {
 // 持久线程池：worker 常驻，linear 调用时分发 out_features 分块任务，
 // 避免每调用 std::thread 创建/join 的开销（Fix CR#L25 中危2）。
 // 参照 vLLM CPU/llama.cpp 的常驻 worker 池思路（接口与数据结构为本项目自定义）。
+// Fix CR#L42(任务3c): 单调用者（串行）约束--run() 的 active_ 为全局状态，
+// 不支持多线程并发调用 run；当前推理为单线程串行调用，满足约束。多请求并行留待作业4。
 class LinearPool {
 public:
     LinearPool() : active_(0), stop_(false) {
@@ -61,7 +63,12 @@ private:
                 task = std::move(tasks_.front());
                 tasks_.pop();
             }
-            task();
+            // Fix CR#L54(任务3a): 任务体不得抛异常；防御性捕获，保证 active_ 递减与主线程唤醒。
+            try {
+                task();
+            } catch (...) {
+                // 吞掉异常，保持线程池可用；任务体契约：纯算术不抛。
+            }
             {
                 std::lock_guard<std::mutex> lk(mtx_);
                 active_--;
@@ -114,10 +121,14 @@ void linear_(T *out, const T *in, const T *weight, const T *bias,
         }
     };
 
-    // Fix CR#L41(中危2): 阈值改为 1024（原 nthread*4 过低，decode 小矩阵线程创建开销 > 计算收益）。
+    // Fix CR#L117(任务3d): 阈值纳入总计算量 n×out×in，避免 decode 最小矩阵（k/v）并行负收益。
+    // 阈值 1e6：decode k/v(0.39e6) 串行；q/o(2.36e6) 与 gate/up/down(13.75e6)、lm_head(233e6) 并行。
+    // 实测 q/o 并行仍有正收益（128 token 串行慢 ~0.84s），故阈值取 1e6 保留 q/o 并行。
+    // bit-exact 保持（每 k 内层 i 顺序不变，仅串/并行切换）。
     auto &pool = llaisys::ops::cpu::detail::get_pool();
     const size_t nthread = std::min(out_features, pool.size());
-    if (out_features < 1024 || nthread <= 1) {
+    const size_t total_ops = n * out_features * in_features;
+    if (total_ops < 1000000 || nthread <= 1) {
         worker(0, out_features);
         return;
     }
