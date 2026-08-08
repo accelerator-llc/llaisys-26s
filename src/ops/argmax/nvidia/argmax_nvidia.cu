@@ -9,8 +9,9 @@ namespace llaisys::ops::nvidia {
 using llaisys::device::nvidia::to_float;
 using llaisys::device::nvidia::from_float;
 
-// 单 block 归约线程数（32 的倍数）。argmax 规模（测试 <=4096，模型 logits voc~1.5e5）
-// 低于 vLLM topK 的多 block 阈值（2e5），单 block 是 vLLM/PyTorch 的标准做法。
+// 单 block 归约线程数（32 的倍数）。单 block 为简化实现（正确性优先）；
+// vLLM 对 >64K 输入走多 CTA（PR #37421），本实现 151936 输入按工业标准可多 block，留作性能优化项。
+// Fix CR#L12-L13：原注释"低于 vLLM 2e5 阈值"查无实据，已修正为如实表述。
 constexpr int ARGMAX_BLOCK = 512;
 constexpr int WARP_SIZE = 32;
 constexpr int NUM_WARPS = ARGMAX_BLOCK / WARP_SIZE;

@@ -20,7 +20,11 @@ target("llaisys-device-nvidia")
         add_cuflags("-Xcompiler", "-fPIC", {force = true})
     end
 
+    -- native 探测构建机最快 GPU 生成 SASS（本机/云端重编译时原生性能最优）；
+    -- 追加 compute_80 生成 PTX 作为 JIT 兜底，构建机与运行机架构不同时（如 CI 异构）跨架构前向兼容。
+    -- Fix CR#L23/L45：原仅 native 无 PTX 兜底，CI 架构不可控时 kernel 可能无法加载。
     add_cugencodes("native")
+    add_cugencodes("compute_80")
     add_files("../src/device/nvidia/*.cu")
 
     on_install(function (target) end)
@@ -42,7 +46,11 @@ target("llaisys-ops-nvidia")
         add_cuflags("-Xcompiler", "-fPIC", {force = true})
     end
 
+    -- native 探测构建机最快 GPU 生成 SASS（本机/云端重编译时原生性能最优）；
+    -- 追加 compute_80 生成 PTX 作为 JIT 兜底，构建机与运行机架构不同时（如 CI 异构）跨架构前向兼容。
+    -- Fix CR#L23/L45：原仅 native 无 PTX 兜底，CI 架构不可控时 kernel 可能无法加载。
     add_cugencodes("native")
+    add_cugencodes("compute_80")
     add_files("../src/ops/*/nvidia/*.cu")
     -- linear 用 cuBLAS（cublasGemmEx）；经 cuda 规则的 utils.inherit.links 继承到 libllaisys.so。
     add_links("cublas")
