@@ -46,6 +46,18 @@ private:
     void allocate_weights();
     void release_weights();
 
+    // 张量池：临时 buffer 预分配复用（容量只增不减），消除热循环 cudaMalloc/cudaFree。
+    // forward_layer slot 跨层共享（层间顺序执行，同流有序安全）；infer slot 跨步复用。
+    // 对齐 PyTorch CUDACachingAllocator / CUDA stream-ordered allocator 的同流复用语义。
+    struct TensorPool {
+        // forward_layer 临时 slot
+        tensor_t normed, q, k, v, attn_val, o, hidden_attn, normed2, gate, up, act, down, hidden_mlp;
+        // infer 临时 slot
+        tensor_t tokens, pos_ids, hidden, final_normed, logits, max_idx, max_val;
+    } _pool;
+    // 取池中 buffer 的 ntoken 切片；容量不足时扩容（只增不减）。shape[0]=ntoken。
+    tensor_t scratch(tensor_t &pool, llaisysDataType_t dt, const std::vector<size_t> &shape);
+
     LlaisysQwen2Meta _meta;
     llaisysDeviceType_t _device;
     int _device_id;

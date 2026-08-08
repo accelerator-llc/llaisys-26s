@@ -161,6 +161,28 @@ void Qwen2Model::reset() {
 }
 
 // ============================================================================
+// 张量池：取 buffer 的 ntoken 切片，容量不足时扩容（只增不减）
+// ============================================================================
+
+tensor_t Qwen2Model::scratch(tensor_t &pool, llaisysDataType_t dt,
+                             const std::vector<size_t> &shape) {
+    // shape[0]=ntoken（随 prefill/decode 变化），其余为静态维度；
+    // pool 按 (cap, rest...) 预分配，cap >= ntoken 时直接 slice(0,0,ntoken) 复用。
+    // 同流内复用安全：stream ordering 保证前 kernel 完成后后 kernel 才执行
+    // （对齐 PyTorch CUDACachingAllocator 同流复用语义）。
+    size_t rest = 1;
+    for (size_t i = 1; i < shape.size(); i++) {
+        rest *= shape[i];
+    }
+    size_t need = shape[0];
+    size_t have = pool ? (rest > 0 ? pool->numel() / rest : 0) : 0;
+    if (have < need) {
+        pool = Tensor::create(shape, dt, _device, _device_id);
+    }
+    return pool->slice(0, 0, need);
+}
+
+// ============================================================================
 // 单层 Transformer 前向
 // ============================================================================
 
@@ -185,13 +207,13 @@ void Qwen2Model::forward_layer(size_t layer, tensor_t &hidden, const tensor_t &p
 
     // ---- Self-Attention ----
     // input_layernorm：hidden (ntoken, hs) -> normed (ntoken, hs)
-    auto normed = Tensor::create({ntoken, hs}, _meta.dtype, _device, _device_id);
+    auto normed = scratch(_pool.normed, _meta.dtype, {ntoken, hs});
     rms_norm(normed, hidden, w_attn_norm, _meta.epsilon);
 
     // q/k/v 投影（Qwen2 的 q/k/v 带 bias）-> (ntoken, nh*dh) / (ntoken, nkvh*dh)
-    auto q = Tensor::create({ntoken, nh * dh}, _meta.dtype, _device, _device_id);
-    auto k = Tensor::create({ntoken, nkvh * dh}, _meta.dtype, _device, _device_id);
-    auto v = Tensor::create({ntoken, nkvh * dh}, _meta.dtype, _device, _device_id);
+    auto q = scratch(_pool.q, _meta.dtype, {ntoken, nh * dh});
+    auto k = scratch(_pool.k, _meta.dtype, {ntoken, nkvh * dh});
+    auto v = scratch(_pool.v, _meta.dtype, {ntoken, nkvh * dh});
     linear(q, normed, w_q, b_q);
     linear(k, normed, w_k, b_k);
     linear(v, normed, w_v, b_v);
@@ -229,40 +251,40 @@ void Qwen2Model::forward_layer(size_t layer, tensor_t &hidden, const tensor_t &p
     auto v_all = _v_cache[layer]->slice(0, 0, kvlen);
 
     // GQA 因果自注意力 -> attn_val (ntoken, nh, dh)
-    auto attn_val = Tensor::create({ntoken, nh, dh}, _meta.dtype, _device, _device_id);
+    auto attn_val = scratch(_pool.attn_val, _meta.dtype, {ntoken, nh, dh});
     self_attention(attn_val, q3, k_all, v_all, scale);
 
     // reshape 3D -> 2D 后 o_proj（无 bias）-> o (ntoken, hs)
     auto attn_val_2d = attn_val->reshape({ntoken, nh * dh});
-    auto o = Tensor::create({ntoken, hs}, _meta.dtype, _device, _device_id);
+    auto o = scratch(_pool.o, _meta.dtype, {ntoken, hs});
     linear(o, attn_val_2d, w_o, nullptr);
 
     // 残差：hidden = hidden + o
-    auto hidden_attn = Tensor::create({ntoken, hs}, _meta.dtype, _device, _device_id);
+    auto hidden_attn = scratch(_pool.hidden_attn, _meta.dtype, {ntoken, hs});
     add(hidden_attn, hidden, o);
     hidden = hidden_attn;
 
     // ---- MLP ----
     // post_attention_layernorm
-    auto normed2 = Tensor::create({ntoken, hs}, _meta.dtype, _device, _device_id);
+    auto normed2 = scratch(_pool.normed2, _meta.dtype, {ntoken, hs});
     rms_norm(normed2, hidden, w_mlp_norm, _meta.epsilon);
 
     // gate / up 投影（无 bias）-> (ntoken, di)
-    auto gate = Tensor::create({ntoken, di}, _meta.dtype, _device, _device_id);
-    auto up = Tensor::create({ntoken, di}, _meta.dtype, _device, _device_id);
+    auto gate = scratch(_pool.gate, _meta.dtype, {ntoken, di});
+    auto up = scratch(_pool.up, _meta.dtype, {ntoken, di});
     linear(gate, normed2, w_gate, nullptr);
     linear(up, normed2, w_up, nullptr);
 
     // SwiGLU：silu(gate) * up -> act (ntoken, di)
-    auto act = Tensor::create({ntoken, di}, _meta.dtype, _device, _device_id);
+    auto act = scratch(_pool.act, _meta.dtype, {ntoken, di});
     swiglu(act, gate, up);
 
     // down 投影（无 bias）-> down (ntoken, hs)
-    auto down = Tensor::create({ntoken, hs}, _meta.dtype, _device, _device_id);
+    auto down = scratch(_pool.down, _meta.dtype, {ntoken, hs});
     linear(down, act, w_down, nullptr);
 
     // 残差：hidden = hidden + down
-    auto hidden_mlp = Tensor::create({ntoken, hs}, _meta.dtype, _device, _device_id);
+    auto hidden_mlp = scratch(_pool.hidden_mlp, _meta.dtype, {ntoken, hs});
     add(hidden_mlp, hidden, down);
     hidden = hidden_mlp;
 }
@@ -280,17 +302,17 @@ int64_t Qwen2Model::infer(const int64_t *token_ids, size_t ntoken) {
     const size_t hs = _meta.hs, voc = _meta.voc;
 
     // 1. token_ids -> tensor (ntoken,) int64
-    auto tokens = Tensor::create({ntoken}, LLAISYS_DTYPE_I64, _device, _device_id);
+    auto tokens = scratch(_pool.tokens, LLAISYS_DTYPE_I64, {ntoken});
     tokens->load(token_ids);
 
     // 2. token embedding -> hidden (ntoken, hs)
-    auto hidden = Tensor::create({ntoken, hs}, _meta.dtype, _device, _device_id);
+    auto hidden = scratch(_pool.hidden, _meta.dtype, {ntoken, hs});
     embedding(hidden, tokens, _weights.in_embed->tensor);
 
     // 3. 位置 id (ntoken,) int64 = [cur_len, cur_len+1, ..., cur_len+ntoken-1]
     //    host 侧填充后经 load 按设备类型 H2H(CPU)/H2D(NVIDIA) 拷入张量；
     //    不可直接写 data()：设备张量返回显存指针，CPU 不可解引用。
-    auto pos_ids = Tensor::create({ntoken}, LLAISYS_DTYPE_I64, _device, _device_id);
+    auto pos_ids = scratch(_pool.pos_ids, LLAISYS_DTYPE_I64, {ntoken});
     std::vector<int64_t> pos_host(ntoken);
     for (size_t i = 0; i < ntoken; i++) {
         pos_host[i] = static_cast<int64_t>(_cur_len + i);
@@ -305,16 +327,16 @@ int64_t Qwen2Model::infer(const int64_t *token_ids, size_t ntoken) {
     // 5. final norm -> lm_head 仅计算最后一行（V3: lm_head 仅计算末行）。
     //    工业标准做法（llama.cpp 默认 logits_all=false，vLLM 同），linear 按行独立，
     //    末行累加顺序与全量计算 bit-exact 一致，argmax 不变；省 prefill lm_head 计算。
-    auto final_normed = Tensor::create({ntoken, hs}, _meta.dtype, _device, _device_id);
+    auto final_normed = scratch(_pool.final_normed, _meta.dtype, {ntoken, hs});
     rms_norm(final_normed, hidden, _weights.out_norm_w->tensor, _meta.epsilon);
     auto last_hidden = final_normed->slice(0, ntoken - 1, ntoken);  // (1, hs)
-    auto logits = Tensor::create({1, voc}, _meta.dtype, _device, _device_id);
+    auto logits = scratch(_pool.logits, _meta.dtype, {1, voc});
     linear(logits, last_hidden, _weights.out_embed->tensor, nullptr);
 
     // 6. argmax（logits 已是 (1, voc)，reshape 为 1D）
     auto last_1d = logits->reshape({voc});  // (voc,)，argmax 要求 1D
-    auto max_idx = Tensor::create({1}, LLAISYS_DTYPE_I64, _device, _device_id);
-    auto max_val = Tensor::create({1}, _meta.dtype, _device, _device_id);
+    auto max_idx = scratch(_pool.max_idx, LLAISYS_DTYPE_I64, {1});
+    auto max_val = scratch(_pool.max_val, _meta.dtype, {1});
     argmax(max_idx, max_val, last_1d);
 
     _cur_len += ntoken;
