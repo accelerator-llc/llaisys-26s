@@ -20,7 +20,7 @@ namespace llaisys::models {
 class Qwen2Model {
 public:
     // 按 meta 预分配全部权重张量与 per-layer KV-Cache buffer。
-    // V1 仅支持 CPU 单设备（device_id 取自 device_ids[0]）。
+    // V1 支持 CPU 与 NVIDIA 单设备（device_id 取自 device_ids[0]）。
     Qwen2Model(const LlaisysQwen2Meta &meta, llaisysDeviceType_t device, int device_id);
     ~Qwen2Model();
 

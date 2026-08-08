@@ -37,8 +37,14 @@ using llaisys::ops::swiglu;
 
 Qwen2Model::Qwen2Model(const LlaisysQwen2Meta &meta, llaisysDeviceType_t device, int device_id)
     : _meta(meta), _device(device), _device_id(device_id), _weights{}, _cur_len(0) {
-    // V1 仅支持 CPU 单设备；多设备留待后续作业。
-    CHECK_ARGUMENT(device == LLAISYS_DEVICE_CPU, "Qwen2Model: V1 only supports CPU device.");
+    // V1 支持 CPU 与 NVIDIA 单设备；多设备留待后续作业。
+    // 设备白名单按编译期宏裁剪：未开启 ENABLE_NVIDIA_API 时仅允许 CPU；
+    // 第二平台（4.9）在此追加分支即可扩展，不泄漏平台专属逻辑到调用方。
+    bool device_supported = (device == LLAISYS_DEVICE_CPU);
+#ifdef ENABLE_NVIDIA_API
+    device_supported = device_supported || (device == LLAISYS_DEVICE_NVIDIA);
+#endif
+    CHECK_ARGUMENT(device_supported, "Qwen2Model: unsupported device type.");
     CHECK_ARGUMENT(_meta.nlayer > 0, "Qwen2Model: nlayer must be positive.");
     CHECK_ARGUMENT(_meta.nh > 0 && _meta.nkvh > 0 && _meta.dh > 0,
                    "Qwen2Model: head config (nh/nkvh/dh) must be positive.");
@@ -200,11 +206,22 @@ void Qwen2Model::forward_layer(size_t layer, tensor_t &hidden, const tensor_t &p
     rope(k3, k3, pos_ids, _meta.theta);
 
     // KV-Cache 追加：把当前 k3/v3 拷入 cache[cur_len : cur_len+ntoken]。
+    // Tensor::load 假定 src 为 host 指针，不能用于设备间拷贝；
+    // 按 dst 设备类型选 H2H(CPU)/D2D(设备)，setDevice 到数据所在设备做拷贝
+    // （与 Tensor::debug 的设备侧 memcpy 模式一致，src/dst 同设备）。
+    auto copy_tensor_data = [](const tensor_t &dst, const tensor_t &src) {
+        llaisysMemcpyKind_t kind = (dst->deviceType() == LLAISYS_DEVICE_CPU)
+                                       ? LLAISYS_MEMCPY_H2H
+                                       : LLAISYS_MEMCPY_D2D;
+        core::context().setDevice(dst->deviceType(), dst->deviceId());
+        core::context().runtime().api()->memcpy_sync(
+            dst->data(), src->data(), src->numel() * src->elementSize(), kind);
+    };
     const size_t kv_off = _cur_len;
     auto k_cache_view = _k_cache[layer]->slice(0, kv_off, kv_off + ntoken);
     auto v_cache_view = _v_cache[layer]->slice(0, kv_off, kv_off + ntoken);
-    k_cache_view->load(k3->data());
-    v_cache_view->load(v3->data());
+    copy_tensor_data(k_cache_view, k3);
+    copy_tensor_data(v_cache_view, v3);
 
     // attention 使用全部历史 k/v [0 : cur_len+ntoken]（slice 得到 contiguous view）。
     const size_t kvlen = _cur_len + ntoken;
@@ -271,11 +288,14 @@ int64_t Qwen2Model::infer(const int64_t *token_ids, size_t ntoken) {
     embedding(hidden, tokens, _weights.in_embed->tensor);
 
     // 3. 位置 id (ntoken,) int64 = [cur_len, cur_len+1, ..., cur_len+ntoken-1]
+    //    host 侧填充后经 load 按设备类型 H2H(CPU)/H2D(NVIDIA) 拷入张量；
+    //    不可直接写 data()：设备张量返回显存指针，CPU 不可解引用。
     auto pos_ids = Tensor::create({ntoken}, LLAISYS_DTYPE_I64, _device, _device_id);
-    int64_t *pos_ptr = reinterpret_cast<int64_t *>(pos_ids->data());
+    std::vector<int64_t> pos_host(ntoken);
     for (size_t i = 0; i < ntoken; i++) {
-        pos_ptr[i] = static_cast<int64_t>(_cur_len + i);
+        pos_host[i] = static_cast<int64_t>(_cur_len + i);
     }
+    pos_ids->load(pos_host.data());
 
     // 4. 逐层前向
     for (size_t i = 0; i < _meta.nlayer; i++) {
@@ -299,7 +319,18 @@ int64_t Qwen2Model::infer(const int64_t *token_ids, size_t ntoken) {
 
     _cur_len += ntoken;
 
-    return *reinterpret_cast<const int64_t *>(max_idx->data());
+    // argmax 结果位于显存时需 D2H 取回（CPU 不可解引用显存指针）；CPU 路径直接读。
+    // 模仿 Tensor::debug 的 D2H 模式：setDevice 到设备侧，用设备 runtime 拷贝。
+    // 仅 8 字节控制信号过桥，hidden/KV-cache/logits 全程驻留显存（数据全闭环）。
+    int64_t next_token = 0;
+    if (max_idx->deviceType() == LLAISYS_DEVICE_CPU) {
+        next_token = *reinterpret_cast<const int64_t *>(max_idx->data());
+    } else {
+        core::context().setDevice(max_idx->deviceType(), max_idx->deviceId());
+        core::context().runtime().api()->memcpy_sync(
+            &next_token, max_idx->data(), sizeof(int64_t), LLAISYS_MEMCPY_D2H);
+    }
+    return next_token;
 }
 
 } // namespace llaisys::models

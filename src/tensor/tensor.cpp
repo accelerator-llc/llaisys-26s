@@ -444,7 +444,17 @@ tensor_t Tensor::to(llaisysDeviceType_t device_type, int device) const {
         kind = LLAISYS_MEMCPY_D2D;
     }
 
-    core::context().setDevice(device_type, target_device);
+    // setDevice 到“非 CPU 的那一侧”：CPU runtime 的 memcpySync 忽略 kind（直接 std::memcpy），
+    // 任何涉及设备的拷贝必须由设备 runtime 执行（仿 Tensor::debug 的 D2H 模式）。
+    // dst 为 CPU（D2H/H2H）时 setDevice 到 src 侧；否则（H2D/D2D）setDevice 到 dst 侧。
+    // 原 bug：固定 setDevice(dst) 使 D2H 落到 CPU runtime，把显存指针当 host 源读 -> 段错误。
+    llaisysDeviceType_t exec_device_type = (device_type == LLAISYS_DEVICE_CPU)
+                                               ? src->deviceType()
+                                               : device_type;
+    int exec_device_id = (device_type == LLAISYS_DEVICE_CPU)
+                              ? src->deviceId()
+                              : target_device;
+    core::context().setDevice(exec_device_type, exec_device_id);
     core::context().runtime().api()->memcpy_sync(
         result->data(), src->data(), nbytes, kind);
 
