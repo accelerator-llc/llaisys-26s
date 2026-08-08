@@ -1,0 +1,9 @@
+#pragma once
+#include "llaisys.h"
+
+#include <cstddef>
+
+namespace llaisys::ops::nvidia {
+void argmax(std::byte *max_idx, std::byte *max_val, const std::byte *vals,
+            llaisysDataType_t idx_type, llaisysDataType_t val_type, size_t numel);
+}

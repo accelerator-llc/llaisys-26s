@@ -4,6 +4,9 @@
 #include "../../utils.hpp"
 
 #include "cpu/rope_cpu.hpp"
+#ifdef ENABLE_NVIDIA_API
+#include "nvidia/rope_nvidia.hpp"
+#endif
 
 namespace llaisys::ops {
 void rope(tensor_t out, tensor_t in, tensor_t pos_ids, float theta) {
@@ -27,12 +30,10 @@ void rope(tensor_t out, tensor_t in, tensor_t pos_ids, float theta) {
     CHECK_ARGUMENT(pos_ids->dtype() == LLAISYS_DTYPE_I64, "Rope: pos_ids must be int64.");
     CHECK_ARGUMENT(theta > 0.0f, "Rope: theta must be positive.");
     // Fix CR#L22-L23: 位置 id 物理语义为非负序列索引，负位置无定义，入口处拒绝（避免静默错误输出）。
-    {
-        const int64_t *pos_check = reinterpret_cast<const int64_t *>(pos_ids->data());
-        for (size_t i = 0; i < pos_ids->numel(); i++) {
-            CHECK_ARGUMENT(pos_check[i] >= 0, "Rope: pos_ids must be non-negative.");
-        }
-    }
+    // 作业4：pos_ids 非负属语义校验（负位置不导致 rope 越界崩溃，仅算出错误 sin/cos），
+    // 非 embedding index 那种内存安全防御。按对称原则（CPU/NVIDIA 一致）+ rope 热点不做 D2H
+    // （见 host-d2h-check-hot-path），pos_ids 非负由调用方保证，op 层不校验。
+    // 原 Fix CR#L22-L23 的 host pos_check 循环已移除（NVIDIA 路径 pos_ids 在显存无法 host 读）。
 
     if (in->deviceType() == LLAISYS_DEVICE_CPU) {
         return cpu::rope(out->data(), in->data(), pos_ids->data(), in->dtype(),
@@ -47,8 +48,9 @@ void rope(tensor_t out, tensor_t in, tensor_t pos_ids, float theta) {
                          pos_ids->dtype(), seq_len, n_heads, head_dim, theta);
 #ifdef ENABLE_NVIDIA_API
     case LLAISYS_DEVICE_NVIDIA:
-        TO_BE_IMPLEMENTED();
-        return;
+        // TO_BE_IMPLEMENTED();
+        return nvidia::rope(out->data(), in->data(), pos_ids->data(), in->dtype(),
+                            pos_ids->dtype(), seq_len, n_heads, head_dim, theta);
 #endif
     default:
         EXCEPTION_UNSUPPORTED_DEVICE;
