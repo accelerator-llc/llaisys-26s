@@ -12,9 +12,6 @@
 #include "../../ops/argmax/op.hpp"
 #include "../../ops/embedding/op.hpp"
 #include "../../ops/linear/op.hpp"
-#ifdef ENABLE_NVIDIA_API
-#include "../../ops/linear/nvidia/linear_nvidia.hpp"
-#endif
 #include "../../ops/rms_norm/op.hpp"
 #include "../../ops/rope/op.hpp"
 #include "../../ops/self_attention/op.hpp"
@@ -33,10 +30,6 @@ using llaisys::ops::rms_norm;
 using llaisys::ops::rope;
 using llaisys::ops::self_attention;
 using llaisys::ops::swiglu;
-#ifdef ENABLE_NVIDIA_API
-using llaisys::ops::nvidia::add_bias3;
-using llaisys::ops::nvidia::linear_batched2;
-#endif
 
 // ============================================================================
 // 构造 / 析构
@@ -224,22 +217,11 @@ void Qwen2Model::forward_layer(size_t layer, tensor_t &hidden, const tensor_t &p
     auto k_cache_view = _k_cache[layer]->slice(0, kv_off, kv_off + ntoken);  // (ntoken, nkvh, dh)
     auto v_cache_view = _v_cache[layer]->slice(0, kv_off, kv_off + ntoken);
     auto v_cache_2d = v_cache_view->reshape({ntoken, nkvh * dh});  // 2D 满足 linear 约束
-#ifdef ENABLE_NVIDIA_API
-    if (_device == LLAISYS_DEVICE_NVIDIA) {
-        // q/k/v linear 不带 bias，合并为一次 add_bias3 kernel（省 2 次 bias launch/层）。
-        linear(q, normed, w_q, nullptr);
-        linear(k, normed, w_k, nullptr);
-        linear(v_cache_2d, normed, w_v, nullptr);
-        add_bias3(q->data(), k->data(), v_cache_2d->data(),
-                  b_q->data(), b_k->data(), b_v->data(),
-                  _meta.dtype, nh * dh, nkvh * dh, nkvh * dh, ntoken);
-    } else
-#endif
-    {
-        linear(q, normed, w_q, b_q);
-        linear(k, normed, w_k, b_k);
-        linear(v_cache_2d, normed, w_v, b_v);
-    }
+    // q/k/v 带 bias（单 GEMM + 单 bias kernel）。batched/bias3 在 5090 实测回退（指针数组
+    // setup 开销 > 省 launch 收益），已回退；保留 rope 直写 cache（必做项 1，省 56 memcpy/步）。
+    linear(q, normed, w_q, b_q);
+    linear(k, normed, w_k, b_k);
+    linear(v_cache_2d, normed, w_v, b_v);
 
     // reshape 2D -> 3D：(seq, nhead, head_dim)；contiguous 张量 reshape 不发生拷贝。
     auto q3 = q->reshape({ntoken, nh, dh});
@@ -277,18 +259,8 @@ void Qwen2Model::forward_layer(size_t layer, tensor_t &hidden, const tensor_t &p
     // gate / up 投影（无 bias）-> (ntoken, di)
     auto gate = scratch(_pool.gate, _meta.dtype, {ntoken, di});
     auto up = scratch(_pool.up, _meta.dtype, {ntoken, di});
-#ifdef ENABLE_NVIDIA_API
-    if (_device == LLAISYS_DEVICE_NVIDIA) {
-        // gate+up 同形状无 bias，合并为一次 batched GEMM（省 1 次 cuBLAS 调用/层）。
-        linear_batched2(gate->data(), up->data(), normed2->data(),
-                        w_gate->data(), w_up->data(),
-                        _meta.dtype, ntoken, hs, di);
-    } else
-#endif
-    {
-        linear(gate, normed2, w_gate, nullptr);
-        linear(up, normed2, w_up, nullptr);
-    }
+    linear(gate, normed2, w_gate, nullptr);
+    linear(up, normed2, w_up, nullptr);
 
     // SwiGLU：silu(gate) * up -> act (ntoken, di)
     auto act = scratch(_pool.act, _meta.dtype, {ntoken, di});
