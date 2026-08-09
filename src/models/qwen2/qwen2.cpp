@@ -26,9 +26,7 @@ using llaisys::ops::add;
 using llaisys::ops::argmax;
 using llaisys::ops::embedding;
 using llaisys::ops::linear;
-using llaisys::ops::linear_kv_fused;
 using llaisys::ops::rms_norm;
-using llaisys::ops::rms_norm_add;
 using llaisys::ops::rope;
 using llaisys::ops::self_attention;
 using llaisys::ops::swiglu;
@@ -219,21 +217,9 @@ void Qwen2Model::forward_layer(size_t layer, tensor_t &hidden, const tensor_t &p
     auto k_cache_view = _k_cache[layer]->slice(0, kv_off, kv_off + ntoken);  // (ntoken, nkvh, dh)
     auto v_cache_view = _v_cache[layer]->slice(0, kv_off, kv_off + ntoken);
     auto v_cache_2d = v_cache_view->reshape({ntoken, nkvh * dh});  // 2D 满足 linear 约束
-    // q/k/v 投影。NVIDIA 走 linear_kv_fused（k+v 合并：C500 decode 手写 GEMV+bias 融合，
-    // 5090 走 2x cuBLAS）；CPU 走原 3x linear（设备分派保护，CPU 路径零变化）。
-    // q 单独 linear（C500 decode 走手写 GEMV，5090 走 cuBLAS）。
-    // LLASYS_FUSE_LINEAR_KV 开关：关则 NVIDIA 也走原 3x linear（回退干净）。
-#if defined(ENABLE_NVIDIA_API) && LLASYS_FUSE_LINEAR_KV
-    if (_device == LLAISYS_DEVICE_NVIDIA) {
-        linear(q, normed, w_q, b_q);
-        linear_kv_fused(k, v_cache_2d, normed, w_k, w_v, b_k, b_v);
-    } else
-#endif
-    {
-        linear(q, normed, w_q, b_q);
-        linear(k, normed, w_k, b_k);
-        linear(v_cache_2d, normed, w_v, b_v);
-    }
+    linear(q, normed, w_q, b_q);
+    linear(k, normed, w_k, b_k);
+    linear(v_cache_2d, normed, w_v, b_v);
 
     // reshape 2D -> 3D：(seq, nhead, head_dim)；contiguous 张量 reshape 不发生拷贝。
     auto q3 = q->reshape({ntoken, nh, dh});
@@ -258,20 +244,11 @@ void Qwen2Model::forward_layer(size_t layer, tensor_t &hidden, const tensor_t &p
     auto o = scratch(_pool.o, _meta.dtype, {ntoken, hs});
     linear(o, attn_val_2d, w_o, nullptr);
 
-    // 残差 + post_attention_layernorm：NVIDIA 走 rms_norm_add 融合（add+rms_norm 一次 kernel，
-    // 省 1 launch/层），CPU 走原 add + rms_norm（设备分派保护，CPU 路径零变化）。
-    // LLASYS_FUSE_RMSNORM_ADD 开关：关则 NVIDIA 也走原 add + rms_norm（回退干净）。
+    // 残差 + post_attention_layernorm
     auto hidden_attn = scratch(_pool.hidden_attn, _meta.dtype, {ntoken, hs});
     auto normed2 = scratch(_pool.normed2, _meta.dtype, {ntoken, hs});
-#if defined(ENABLE_NVIDIA_API) && LLASYS_FUSE_RMSNORM_ADD
-    if (_device == LLAISYS_DEVICE_NVIDIA) {
-        rms_norm_add(normed2, hidden_attn, hidden, o, w_mlp_norm, _meta.epsilon);
-    } else
-#endif
-    {
-        add(hidden_attn, hidden, o);
-        rms_norm(normed2, hidden_attn, w_mlp_norm, _meta.epsilon);
-    }
+    add(hidden_attn, hidden, o);
+    rms_norm(normed2, hidden_attn, w_mlp_norm, _meta.epsilon);
     hidden = hidden_attn;
 
     // gate / up 投影（无 bias）-> (ntoken, di)
