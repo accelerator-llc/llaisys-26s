@@ -1,4 +1,4 @@
-// Qwen2 大语言模型 C++ 实现（作业3）。
+// Qwen2 大语言模型 C++ 实现。
 // 前向：embedding -> 逐层 Transformer 块（attn_norm + GQA self-attn + RoPE + 残差，
 // mlp_norm + SwiGLU MLP + 残差）-> final norm -> lm_head -> argmax。
 // KV-Cache 逐 token 增量更新。
@@ -37,9 +37,9 @@ using llaisys::ops::swiglu;
 
 Qwen2Model::Qwen2Model(const LlaisysQwen2Meta &meta, llaisysDeviceType_t device, int device_id)
     : _meta(meta), _device(device), _device_id(device_id), _weights{}, _cur_len(0) {
-    // V1 支持 CPU 与 NVIDIA 单设备；多设备留待后续作业。
+    // 支持 CPU 与 NVIDIA 单设备；多设备留待后续。
     // 设备白名单按编译期宏裁剪：未开启 ENABLE_NVIDIA_API 时仅允许 CPU；
-    // 第二平台（4.9）在此追加分支即可扩展，不泄漏平台专属逻辑到调用方。
+    // C500 经 cu-bridge 兼容层以 NVIDIA 设备类型接入（环境层适配，仓库零改动）。
     bool device_supported = (device == LLAISYS_DEVICE_CPU);
 #ifdef ENABLE_NVIDIA_API
     device_supported = device_supported || (device == LLAISYS_DEVICE_NVIDIA);
@@ -75,7 +75,7 @@ Qwen2Model::~Qwen2Model() {
 // ============================================================================
 
 void Qwen2Model::allocate_weights() {
-    // Fix CR#L51(低危5): 中途异常时释放已分配权重，避免泄漏（构造函数异常析构不执行）。
+    // 中途异常时释放已分配权重，避免泄漏（构造函数异常析构不执行）。
     try {
     llaisysDataType_t dt = _meta.dtype;
 
@@ -85,7 +85,7 @@ void Qwen2Model::allocate_weights() {
     };
     // per-layer 权重数组：nlayer 个同 shape 张量，连续存放于 new[] 数组。
     auto mk_arr = [&](const std::vector<size_t> &shape) -> llaisysTensor_t * {
-        // Fix CR#L87(任务3b): 值初始化为 nullptr，mk() 中途抛异常时释放已分配元素与数组外壳。
+        // 值初始化为 nullptr，mk() 中途抛异常时释放已分配元素与数组外壳。
         llaisysTensor_t *arr = new llaisysTensor_t[_meta.nlayer]();
         try {
             for (size_t i = 0; i < _meta.nlayer; i++) {
@@ -306,7 +306,7 @@ int64_t Qwen2Model::infer(const int64_t *token_ids, size_t ntoken) {
         forward_layer(i, hidden, pos_ids, ntoken);
     }
 
-    // 5. final norm -> lm_head 仅计算最后一行（V3: lm_head 仅计算末行）。
+    // 5. final norm -> lm_head 仅计算最后一行。
     //    工业标准做法（llama.cpp 默认 logits_all=false，vLLM 同），linear 按行独立，
     //    末行累加顺序与全量计算 bit-exact 一致，argmax 不变；省 prefill lm_head 计算。
     auto final_normed = scratch(_pool.final_normed, _meta.dtype, {ntoken, hs});

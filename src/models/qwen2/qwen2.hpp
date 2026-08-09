@@ -1,4 +1,4 @@
-// Qwen2 大语言模型 C++ 实现（作业3）。
+// Qwen2 大语言模型 C++ 实现。
 // Qwen2Model 类：持有 meta、权重张量与 KV-Cache，提供 create/destroy/reset/infer；
 // 前向复用 llaisys::ops 算子（embedding/linear/rms_norm/rope/self_attention/
 // swiglu/argmax/add）。
@@ -20,7 +20,7 @@ namespace llaisys::models {
 class Qwen2Model {
 public:
     // 按 meta 预分配全部权重张量与 per-layer KV-Cache buffer。
-    // V1 支持 CPU 与 NVIDIA 单设备（device_id 取自 device_ids[0]）。
+    // 支持 CPU 与 NVIDIA 单设备（device_id 取自 device_ids[0]）。
     Qwen2Model(const LlaisysQwen2Meta &meta, llaisysDeviceType_t device, int device_id);
     ~Qwen2Model();
 

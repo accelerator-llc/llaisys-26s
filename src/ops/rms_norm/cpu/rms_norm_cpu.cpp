@@ -11,7 +11,6 @@ void rms_norm_(T *out, const T *in, const T *weight, size_t n, size_t d, float e
     // 对齐 vLLM CPU rms_norm_impl：平方和在 float 域累加（低精度必须提升），
     // 用 1.0f/std::sqrt(mean_sq + eps) 一次算出 inv_rms（vLLM CPU 亦用 1.0f/sqrtf
     // 而非 rsqrtf，与代码一致），再做 x * inv_rms * w。算法对齐以 test/ops PyTorch 参考为准。
-    // Fix CR#L11
     for (size_t nn = 0; nn < n; nn++) {
         const T *x_row = in + nn * d;
         T *y_row = out + nn * d;

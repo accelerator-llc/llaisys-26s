@@ -14,7 +14,7 @@ void rope_(T *out, const T *in, const int64_t *pos_ids,
     // 做旋转：y_a = x_a*cos - x_b*sin,  y_b = x_b*cos + x_a*sin。
     // 半分格式与旋转符号对齐 torch_rope，并对齐 llama.cpp GPT-NeoX 风格 RoPE 的
     // 半分旋转（dst0=x0*cos-x1*sin, dst1=x0*sin+x1*cos，各 backend 保留 is_neox 路径）。
-    // Fix CR#L16: 注释收敛符号名（旧称 ggml_compute_forward_rope_f32 已模板化为
+    // 注释收敛符号名（旧称 ggml_compute_forward_rope_f32 已模板化为
     // ggml_compute_forward_rope），算法对齐以 test/ops 的 PyTorch 参考为准。
     size_t half = head_dim / 2;
 

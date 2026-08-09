@@ -10,8 +10,8 @@ using llaisys::device::nvidia::to_float;
 using llaisys::device::nvidia::from_float;
 
 // cuBLAS handle（单 device，懒创建；C++11 保证初始化线程安全）。
-// V1 单 device；多 device 需 per-device handle（4.9 第二平台另议）。
-// 4.6 linear 用 cuBLAS，与 llama.cpp/vLLM/PyTorch 对 F32/F16/BF16 矩阵乘的做法一致，
+// 单 device 约束；多 device 需 per-device handle。
+// linear 用 cuBLAS，与 llama.cpp/vLLM/PyTorch 对 F32/F16/BF16 矩阵乘的做法一致，
 // cuBLAS 自动选 GEMM（m 大）与 GEMV（m=1 decode）路径。
 static cublasHandle_t get_cublas_handle() {
     static cublasHandle_t handle = [] {

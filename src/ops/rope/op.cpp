@@ -26,14 +26,14 @@ void rope(tensor_t out, tensor_t in, tensor_t pos_ids, float theta) {
            "Rope: pos_ids must be a 1D tensor of length seq_len.");
     CHECK_SAME_DTYPE(out->dtype(), in->dtype());
     CHECK_ARGUMENT(head_dim > 0 && head_dim % 2 == 0,
-                   "Rope: head_dim must be a positive even number.");  // Fix CR#L25: 补 head_dim>0 下界，堵住 head_dim=0 静默返回脏数据
+                   "Rope: head_dim must be a positive even number.");  // 补 head_dim>0 下界，堵住 head_dim=0 静默返回脏数据
     CHECK_ARGUMENT(pos_ids->dtype() == LLAISYS_DTYPE_I64, "Rope: pos_ids must be int64.");
     CHECK_ARGUMENT(theta > 0.0f, "Rope: theta must be positive.");
-    // Fix CR#L22-L23: 位置 id 物理语义为非负序列索引，负位置无定义，入口处拒绝（避免静默错误输出）。
-    // 作业4：pos_ids 非负属语义校验（负位置不导致 rope 越界崩溃，仅算出错误 sin/cos），
-    // 非 embedding index 那种内存安全防御。按对称原则（CPU/NVIDIA 一致）+ rope 热点不做 D2H
-    // （见 host-d2h-check-hot-path），pos_ids 非负由调用方保证，op 层不校验。
-    // 原 Fix CR#L22-L23 的 host pos_check 循环已移除（NVIDIA 路径 pos_ids 在显存无法 host 读）。
+    // 位置 id 物理语义为非负序列索引，负位置无定义，入口处拒绝（避免静默错误输出）。
+    // pos_ids 非负属语义校验（负位置不导致 rope 越界崩溃，仅算出错误 sin/cos），
+    // 非 embedding index 那种内存安全防御。按对称原则（CPU/NVIDIA 一致）+ rope 热点不做 D2H，
+    // pos_ids 非负由调用方保证，op 层不校验。
+    // 原 host pos_check 循环已移除（NVIDIA 路径 pos_ids 在显存无法 host 读）。
 
     if (in->deviceType() == LLAISYS_DEVICE_CPU) {
         return cpu::rope(out->data(), in->data(), pos_ids->data(), in->dtype(),
