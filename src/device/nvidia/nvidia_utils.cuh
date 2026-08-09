@@ -10,7 +10,18 @@
 #include <cuda_runtime_api.h>
 #include <cublas_v2.h>
 
+#include <cstring>
+
 #include "../../utils.hpp"
+
+// 4.9.6 优化：融合开关宏（默认开，实测回退时只关宏，编译期生效）。
+// 每个 fused 接口独立开关，便于组合实测矩阵（T5）数据裁决保留/回退。
+#ifndef LLASYS_FUSE_LINEAR_KV
+#define LLASYS_FUSE_LINEAR_KV 1
+#endif
+#ifndef LLASYS_FUSE_RMSNORM_ADD
+#define LLASYS_FUSE_RMSNORM_ADD 1
+#endif
 
 // CUDA API 返回码统一检查：失败时经 ASSERT 抛出 llaisys 异常，与项目 CHECK/ASSERT 风格一致。
 #define CUDA_CHECK(call)                                                         \
@@ -29,6 +40,20 @@
     } while (0)
 
 namespace llaisys::device::nvidia {
+
+// 4.9.6 设备分派（T4）：运行时探测设备名，一次探测、缓存复用。
+// cucc 不定义平台宏（-dM 空实测），故走运行时探测（vLLM Platform 模式）。
+// C500（沐曦 MetaX）走优化路径，NVIDIA 走原路径。cudaGetDeviceProperties 返回设备名。
+inline bool is_c500() {
+    static bool cached = [] {
+        cudaDeviceProp prop;
+        if (cudaGetDeviceProperties(&prop, 0) != cudaSuccess) {
+            return false;
+        }
+        return std::strstr(prop.name, "MetaX") != nullptr;
+    }();
+    return cached;
+}
 
 // 将 llaisys 拷贝方向枚举映射为 CUDA cudaMemcpyKind（显式映射，不依赖枚举数值顺序）。
 inline cudaMemcpyKind toCudaMemcpyKind(llaisysMemcpyKind_t kind) {
