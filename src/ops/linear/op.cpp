@@ -81,6 +81,7 @@ void linear_kv_fused(tensor_t out_k, tensor_t out_v, tensor_t in,
                out_v->shape()[0] == n && out_v->shape()[1] == out_v_features,
            "Linear: out must have shape (n, out_features).");
     CHECK_SAME_DTYPE(out_k->dtype(), in->dtype(), weight_k->dtype());
+    CHECK_SAME_DTYPE(out_v->dtype(), in->dtype(), weight_v->dtype());
     bool has_bias_k = static_cast<bool>(bias_k);
     bool has_bias_v = static_cast<bool>(bias_v);
     if (has_bias_k) {

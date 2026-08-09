@@ -62,7 +62,7 @@ void rms_norm_add(tensor_t out_norm, tensor_t residual_out,
            "RmsNorm: out must have the same shape as input.");
     ASSERT(weight->ndim() == 1 && weight->numel() == d,
            "RmsNorm: weight must be a 1D tensor of length equal to the last dim of input.");
-    CHECK_SAME_DTYPE(out_norm->dtype(), x->dtype(), residual->dtype(), weight->dtype());
+    CHECK_SAME_DTYPE(out_norm->dtype(), residual_out->dtype(), x->dtype(), residual->dtype(), weight->dtype());
     CHECK_ARGUMENT(d > 0, "RmsNorm: the last dim of input must be positive.");
     CHECK_ARGUMENT(eps > 0.0f, "RmsNorm: eps must be positive.");
 

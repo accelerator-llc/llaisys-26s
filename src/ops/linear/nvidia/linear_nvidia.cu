@@ -62,7 +62,7 @@ void linear(std::byte *out, const std::byte *in, const std::byte *weight, const 
     // 4.9.6 T1：C500 decode 小形状走手写 GEMV + bias 融合（省 add_bias kernel + 手写快 11-19%）。
     // NVIDIA / prefill / 大形状走下方 cuBLAS 路径。is_c500() 一次探测缓存（T4）。
     if (llaisys::device::nvidia::is_c500() && n == 1 && val_type == LLAISYS_DTYPE_BF16 &&
-        out_features <= 1536 && in_features <= 1536) {
+        out_features <= 1536 && in_features <= 1536 && in_features % 8 == 0) {
         constexpr int GEMV_BLOCK = 256;
         int grid = (static_cast<int>(out_features) + 7) / 8;
         size_t smem = in_features * sizeof(llaisys::bf16_t);
@@ -227,7 +227,7 @@ void linear_kv_fused(std::byte *out_k, std::byte *out_v, const std::byte *in,
                      size_t out_k_features, size_t out_v_features) {
 #if LLASYS_FUSE_LINEAR_KV
     if (llaisys::device::nvidia::is_c500() && n == 1 && val_type == LLAISYS_DTYPE_BF16 &&
-        out_k_features <= 1536 && out_v_features <= 1536 && in_features <= 1536) {
+        out_k_features <= 1536 && out_v_features <= 1536 && in_features <= 1536 && in_features % 8 == 0) {
         constexpr int GEMV_BLOCK = 256;
         int total = static_cast<int>(out_k_features + out_v_features);
         int grid = (total + 7) / 8;
