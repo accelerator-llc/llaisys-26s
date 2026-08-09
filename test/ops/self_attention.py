@@ -15,7 +15,7 @@ def torch_self_attention(attn_val, query, key, value, scale):
     L, S = query.size(-2), key.size(-2)
     attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
 
-    # 作业4 临时修复：原 torch.ones 缺 device 参数，device=nvidia 时参照计算设备不匹配崩溃（框架测试 bug，非算子实现问题）
+    # 掩码需与计算设备一致（缺 device 参数时 GPU 上崩溃）
     temp_mask = torch.ones(L, S, dtype=torch.bool, device=query.device).tril(diagonal=S-L)
     attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
     attn_bias.to(query.dtype)

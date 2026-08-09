@@ -12,8 +12,8 @@ import struct
 import safetensors
 
 
-# dtype -> 字节数，用于加载前校验原始字节与张量容量一致（Fix CR#L132 低危1）。
-# Fix CR#L16(任务3e): 补齐 F8（8-bit float，1 字节）；未知 dtype 在 _tensor_capacity_bytes 抛错。
+# dtype -> 字节数，用于加载前校验原始字节与张量容量一致。
+# 含 F8（8-bit float，1 字节）；未知 dtype 在 _tensor_capacity_bytes 抛错。
 _DSIZE = {
     DataType.BYTE: 1, DataType.BOOL: 1, DataType.I8: 1, DataType.I16: 2,
     DataType.I32: 4, DataType.I64: 8, DataType.U8: 1, DataType.U16: 2,
@@ -45,16 +45,16 @@ class Qwen2:
         meta.epsilon = config["rms_norm_eps"]
         meta.theta = config["rope_theta"]
         meta.end_token = config["eos_token_id"]
-        # Fix CR#L38(低危3): KV-Cache 容量取 min(max_position_embeddings, 4096)，
+        # KV-Cache 容量取 min(max_position_embeddings, 4096)，
         # 4096 为内存预算折中（28 层×2×4096×256×2B≈117MB）；与 sliding_window 无关，
         # prompt+生成超过此值会触发 C++ 侧溢出校验（返回错误而非越界）。
         meta.maxseq = min(config.get("max_position_embeddings", 4096), 4096)
 
-        # 创建模型（V1 仅 CPU 单设备，device_ids[0]=0）。
+        # 创建模型（仅 CPU 单设备，device_ids[0]=0）。
         device_ids = (ctypes.c_int * 1)(0)
         self._model = LIB_LLAISYS.llaisysQwen2ModelCreate(
             ctypes.byref(meta), device, device_ids, 1)
-        # Fix CR#L20(中危1): Create 失败（非法参数或 C++ 异常）返回 nullptr。
+        # Create 失败（非法参数或 C++ 异常）返回 nullptr。
         if not self._model:
             raise RuntimeError("llaisysQwen2ModelCreate failed (invalid meta or C++ exception)")
         self._weights = LIB_LLAISYS.llaisysQwen2ModelWeights(self._model).contents
@@ -75,7 +75,7 @@ class Qwen2:
                 if not self._load_weight(name_, raw_map[name_]):
                     raise ValueError(f"未知权重名，无法映射: {name_}")
                 loaded_tensors += 1
-        # Fix CR#L166(低危2): 校验已加载张量数与 safetensors 总数一致，漏载即报错。
+        # 校验已加载张量数与 safetensors 总数一致，漏载即报错。
         if loaded_tensors != total_tensors:
             raise ValueError(f"loaded {loaded_tensors} != total {total_tensors}")
 
@@ -90,13 +90,11 @@ class Qwen2:
 
         # TODO: Implement generate function
 
-        # Fix CR#L77(低危8): 空 inputs 前置校验，避免 ntoken=0 触发 C++ 异常路径。
+        # 空 inputs 前置校验，避免 ntoken=0 触发 C++ 异常路径。
         if not inputs:
             raise ValueError("inputs must not be empty")
-        # Fix CR#L92(任务1): 建模 HF 语义--贪婪模式下 top_k/top_p/temperature 存在但不生效
-        # （HF generate 默认 do_sample=False 即贪婪，采样参数本就不生效，已核实）。
-        # V1 仅实现贪婪 argmax；非贪婪参数显式忽略并以注释文档化，不再抛异常（恢复非 --test 兼容）。
-        # 与 --test 逐 token 一致要求不冲突。
+        # 建模 HF 语义：贪婪模式下 top_k/top_p/temperature 存在但不生效（HF generate
+        # 默认 do_sample=False 即贪婪）；本实现仅支持贪婪 argmax，非贪婪参数忽略。
         if max_new_tokens is None:
             max_new_tokens = 128
 
@@ -104,7 +102,7 @@ class Qwen2:
 
         inputs = list(inputs)
         # prefill：整段 prompt 一次前向，返回首个生成 token。
-        # Fix CR#L20(中危1): Infer 返回 -1 表 C++ 异常，转 Python 异常。
+        # Infer 返回 -1 表 C++ 异常，转 Python 异常。
         token_ids = (ctypes.c_int64 * len(inputs))(*inputs)
         next_token = int(LIB_LLAISYS.llaisysQwen2ModelInfer(
             self._model, token_ids, len(inputs)))
@@ -129,7 +127,7 @@ class Qwen2:
         if getattr(self, "_model", None):
             LIB_LLAISYS.llaisysQwen2ModelDestroy(self._model)
             self._model = None
-            self._weights = None  # Fix CR#L45(建议7): 置空避免 use-after-free。
+            self._weights = None  # 置空避免 use-after-free。
 
     # ------------------------------------------------------------------
     # 权重加载辅助
@@ -145,7 +143,7 @@ class Qwen2:
         """
         with open(file, "rb") as f:
             header_len = struct.unpack("<Q", f.read(8))[0]
-            # Fix CR#L110(低危6): header_len 合理性校验，防止损坏文件产生异常切片。
+            # header_len 合理性校验，防止损坏文件产生异常切片。
             if header_len == 0 or header_len > (1 << 30):
                 raise ValueError(f"invalid safetensors header_len: {header_len}")
             header = json.loads(f.read(header_len))
@@ -157,7 +155,7 @@ class Qwen2:
                 if name == "__metadata__":
                     continue
                 start, end = info["data_offsets"]
-                # Fix CR#L110(低危6): offsets 越界校验。
+                # offsets 越界校验。
                 if start < 0 or end < start or data_start + end > file_size:
                     raise ValueError(f"weight '{name}' offsets out of range: [{start},{end})")
                 raw_map[name] = mm[data_start + start : data_start + end]
@@ -216,7 +214,7 @@ class Qwen2:
         handle = self._match_weight_handle(name)
         if handle is None:
             return False
-        # Fix CR#L132(低危1): 校验原始字节长度与张量容量一致，避免映射错配静默加载或越界。
+        # 校验原始字节长度与张量容量一致，避免映射错配静默加载或越界。
         expected = self._tensor_capacity_bytes(handle)
         if len(raw) != expected:
             raise ValueError(

@@ -24,7 +24,7 @@ void rms_norm(tensor_t out, tensor_t in, tensor_t weight, float eps) {
            "RmsNorm: weight must be a 1D tensor of length equal to the last dim of input.");
     CHECK_SAME_DTYPE(out->dtype(), in->dtype(), weight->dtype());
     CHECK_ARGUMENT(d > 0, "RmsNorm: the last dim of input must be positive.");
-    CHECK_ARGUMENT(eps > 0.0f, "RmsNorm: eps must be positive.");  // 拒绝 eps=0，堵住全零行 sqrt(0)->inf->NaN 的注入入口
+    CHECK_ARGUMENT(eps > 0.0f, "RmsNorm: eps must be positive.");  // eps 须为正，否则全零行 sqrt(0)->inf->NaN
 
     if (in->deviceType() == LLAISYS_DEVICE_CPU) {
         return cpu::rms_norm(out->data(), in->data(), weight->data(), in->dtype(), n, d, eps);
